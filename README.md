@@ -35,7 +35,7 @@ A manual gap analysis against a framework like NIST CSF 2.0 (106 subcategories),
 
 - Takes the policy as input (PDF or TXT).
 - Validates that the document is actually security / compliance related (pre-filter).
-- Maps the content against the selected framework using an LLM (Gemini 2.5 Flash).
+- Maps the content against the selected framework using Claude (Haiku 5.5 by default) with a strict JSON-schema output contract.
 - For every control returns: status, compliance level (%), **verbatim evidence quote**, actionable recommendation, confidence score, and priority.
 - Generates an executive-ready PDF report for auditors or steering committees.
 
@@ -88,15 +88,15 @@ Frameworks live as declarative JSON files in `frameworks/` — adding a new one 
          │ ◀───────────────────────────────────── │ 2. SHA-256 hash → cache lookup
          │                                        │ 3. is_compliance_document?
          │                                        │ 4. build_prompt(controls)
-         │  POST /export-pdf                      │ 5. Gemini 2.5 Flash
+         │  POST /export-pdf                      │ 5. Claude (structured)
          │ ─────────────────────────────────────▶ │ 6. parse + reconcile
          │  application/pdf                       │ 7. verify quotes, score
          │ ◀───────────────────────────────────── │ 8. cache + return
          │   (reportlab)                          │
                                                   ▼
                                         ┌──────────────────────┐
-                                        │   Google Gemini API  │
-                                        │  (gemini-2.5-flash)  │
+                                        │   Anthropic Claude   │
+                                        │  (claude-haiku-5-5)  │
                                         └──────────────────────┘
 ```
 
@@ -109,9 +109,10 @@ Frameworks live as declarative JSON files in `frameworks/` — adding a new one 
 
 1. **Extraction** (`pdf_to_markdown`): the PDF is converted to lightweight Markdown — ALL-CAPS lines are promoted to `##`, Title Case to `###`, and bullets are normalized. This gives the LLM a hierarchical structure that's easier to map than flat text.
 2. **Hash + cache**: SHA-256 of the extracted text. If this document has already been analyzed against this framework, the cached result is returned immediately.
-3. **Relevance pre-filter**: before the expensive analysis, Gemini is asked with `max_tokens=5` whether the document deals with infosec / compliance / privacy / governance. If the answer doesn't start with "YES", the request aborts with a clear error. This avoids spending 32K tokens analyzing a restaurant menu.
-4. **Analysis prompt** (`build_prompt`): the model receives a role ("senior GRC analyst"), a 12K-character excerpt of the document (longer documents are flagged as truncated in the results), the slimmed `{id, name}` list of controls, and a strict JSON contract for the output.
-5. **Defensive parsing** (`parse`): code fences are stripped, the first `[` and last `]` are located, and `json.loads` runs on that slice. Resilient to the "thinking" preambles Gemini 2.5 sometimes emits.
+3. **Relevance pre-filter**: before the expensive analysis, Claude classifies the first 1,500 characters and answers `{"is_security_document": true|false}` (schema-enforced). Non-security documents are rejected before spending tokens on a full analysis.
+4. **Analysis prompt** (`build_system_prompt`): the model receives a role ("senior GRC analyst"), the framework's controls with their descriptions, and the assessment rules; the document goes in the user message (up to 200K characters, ~50K tokens, which keeps requests under Haiku's 100K-token pricing threshold; longer documents are flagged as truncated in the results).
+5. **Structured output** (`analyze_with_claude`): the request uses Claude's `output_config` JSON schema, so the response is guaranteed to be valid JSON with the expected fields and enum values — no regex clean-up of free text. Truncated (`max_tokens`) and refused responses are detected and reported explicitly.
+   **Prompt caching**: the role, rules and full control catalog (with descriptions) form a static system prompt per framework, marked with `cache_control`. Repeated analyses against the same framework read it from cache; only the document is billed at the full input rate.
 6. **Reconciliation** (`reconcile_results`): control IDs are normalized (e.g. `A.5.15` → `5.15`, `GV.OC-1` → `GV.OC-01`), unknown or duplicated IDs are dropped, and the control name is taken from the framework file rather than from the model.
 7. **Evidence verification** (`verify_evidence`): each quote is normalized (case, whitespace, smart quotes, Markdown markers) and matched against the full document text. Quotes shortened with `...` must match fragment by fragment. Quotes that don't match are flagged `UNVERIFIED` — a basic guard against hallucinated citations.
 8. **Scoring**: `(met + 0.5 × partial) / framework_controls × 100`. Controls the document doesn't address count as gaps. Scoring only the controls the model returned would inflate the result: a policy covering 10 of 93 ISO controls could score above 90%. Coverage (`addressed / framework_controls`) is reported separately.
@@ -131,7 +132,7 @@ Frameworks live as declarative JSON files in `frameworks/` — adding a new one 
 | Layer | Technology |
 |---|---|
 | **Backend** | Python 3.11+, Flask 3 |
-| **LLM** | Google Gemini 2.5 Flash (`google-genai` SDK) |
+| **LLM** | Anthropic Claude Haiku 5.5 (`anthropic` SDK) — structured outputs + prompt caching |
 | **PDF in** | pypdf 4 |
 | **PDF out** | ReportLab 4 (Platypus) |
 | **Frontend** | Vanilla HTML/CSS/JS + anime.js for transitions |
@@ -139,6 +140,25 @@ Frameworks live as declarative JSON files in `frameworks/` — adding a new one 
 | **Config** | python-dotenv (`.env`) |
 
 No database, no frontend framework, no container — a single `python app.py` boots the whole thing.
+
+### Setup
+
+```bash
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Create a `.env` file (never commit it):
+
+```env
+ANTHROPIC_API_KEY=sk-ant-...
+# Optional
+ANTHROPIC_MODEL=claude-haiku-5-5      # e.g. claude-sonnet-5-5 for harder documents
+ANTHROPIC_MAX_TOKENS=16000
+```
+
+Then run `python app.py` and open http://localhost:5000.
 
 ---
 
@@ -202,7 +222,7 @@ Roadmap ideas:
 
 ## Credits
 
-- **Héctor Silva** ([@Hector2304](https://github.com/Hector2304)) — LLM integration (model selection, Gemini API), framework ingestion and normalization, backend, scoring and evidence verification.
+- **Héctor Silva** ([@Hector2304](https://github.com/Hector2304)) — LLM integration (model selection, Claude API: structured outputs, prompt caching), framework ingestion and normalization, backend, scoring and evidence verification.
 - **E. Aldir Alcalá** ([@21Aldir](https://github.com/21Aldir) · [LinkedIn](https://www.linkedin.com/in/aldiralcala/)) — GRC domain expertise: framework selection, versions, and assessment methodology.
 
 > Most of the early commits appear under Aldir's account because the initial development was done on his machine.
