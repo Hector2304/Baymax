@@ -515,6 +515,27 @@
     .priority-badge.medium { background: var(--yellow-bg); color: var(--yellow); }
     .priority-badge.low    { background: var(--bg-secondary); color: var(--text-secondary); }
 
+    /* Evidence that could not be matched to the source document */
+    .ev-flag {
+      font-family: var(--mono); font-size: 9px; font-style: normal;
+      text-transform: uppercase; letter-spacing: .05em;
+      padding: 1px 6px; margin-right: 6px; border-radius: 3px;
+      background: var(--yellow-bg); color: var(--yellow);
+    }
+    .results-note { font-family: var(--mono); font-size: 10px; color: var(--yellow); margin-top: 6px; line-height: 1.5; }
+
+    /* Controls the document does not address */
+    .not-addressed { margin-top: 18px; }
+    .not-addressed summary {
+      cursor: pointer; font-family: var(--mono); font-size: 11px; color: var(--fg2);
+      padding: 8px 0;
+    }
+    .not-addressed-list { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0 4px; }
+    .not-addressed-list span {
+      font-family: var(--mono); font-size: 10px; color: var(--fg2);
+      border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px;
+    }
+
     /* Export button */
     .btn-export {
       width: 100%;
@@ -927,12 +948,18 @@ function stopLoading() {
 // SCREEN 4 — RESULTS
 // ═══════════════════════════════════════════════════════
 function renderResults(data) {
-  const controls = data.controls || [];
+  const controls     = data.controls || [];
+  const notAddressed = data.not_addressed_controls || [];
+  const fwTotal      = data.total || (controls.length + notAddressed.length);
 
-  // Overall score from compliance_level average
-  const avgScore = controls.length
-    ? Math.round(controls.reduce((s, c) => s + (c.compliance_level || 0), 0) / controls.length)
-    : data.score || 0;
+  // Overall score comes from the backend: calculated over ALL framework controls
+  const overallScore = Math.round(data.score || 0);
+
+  const notes = [];
+  if (data.unverified)
+    notes.push(`⚠ ${data.unverified} evidence quote(s) not found in the document — review manually`);
+  if (data.document_truncated)
+    notes.push('⚠ Document was truncated — later sections were not assessed');
 
   // Reset counters
   ['score-number','stat-met','stat-partial','stat-missing'].forEach(id =>
@@ -944,13 +971,14 @@ function renderResults(data) {
     <div class="meta-row">Framework <span>${escHtml(data.framework_name || '')}</span></div>
     <div class="meta-row">Document  <span>${escHtml(data.document_name  || '')}</span></div>
     <div class="meta-row">Date      <span>${escHtml(data.analysis_date  || '')}</span></div>
-    <div class="meta-row">Controls  <span>${data.total || controls.length} assessed</span></div>
+    <div class="meta-row">Coverage  <span>${controls.length} of ${fwTotal} controls addressed (${data.coverage ?? 0}%)</span></div>
     ${data.cached ? '<div class="meta-row" style="color:var(--green)">⚡ cached</div>' : ''}
+    ${notes.map(n => `<div class="results-note">${escHtml(n)}</div>`).join('')}
   `;
 
-  // Domain breakdown
+  // Domain breakdown (controls not addressed count as 0%)
   const domains = {};
-  controls.forEach(c => {
+  [...controls, ...notAddressed.map(n => ({ ...n, compliance_level: 0 }))].forEach(c => {
     const cat = c.category || 'Uncategorized';
     if (!domains[cat]) domains[cat] = { score: 0, count: 0 };
     domains[cat].score += (c.compliance_level || 0);
@@ -980,16 +1008,25 @@ function renderResults(data) {
         <div class="control-body">
           <div class="control-id">${escHtml(c.control_id)}</div>
           <div class="control-name">${escHtml(c.control_name)}</div>
-          ${ev  ? `<div class="control-ev">"${escHtml(ev)}"</div>` : ''}
+          ${ev  ? `<div class="control-ev">${c.evidence_verified === false
+                    ? '<span class="ev-flag" title="This quote was not found in the source document">unverified</span>'
+                    : ''}"${escHtml(ev)}"</div>` : ''}
           ${rec ? `<div class="control-rec">→ ${escHtml(rec)}</div>` : ''}
         </div>
         <div class="priority-badge ${escHtml(c.priority)}">${escHtml(c.priority)}</div>
       </div>`;
-  }).join('');
+  }).join('') + (notAddressed.length ? `
+      <details class="not-addressed">
+        <summary>${notAddressed.length} controls not addressed in the document</summary>
+        <div class="not-addressed-list">
+          ${notAddressed.map(n =>
+            `<span title="${escHtml(n.control_name)}">${escHtml(n.control_id)}</span>`).join('')}
+        </div>
+      </details>` : '');
 
   // Animate after screen transition settles
   setTimeout(() => {
-    countUp('score-number', 0, avgScore,     1400);
+    countUp('score-number', 0, overallScore, 1400);
     countUp('stat-met',     0, data.met     || 0, 900);
     countUp('stat-partial', 0, data.partial || 0, 900);
     countUp('stat-missing', 0, data.missing || 0, 900);

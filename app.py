@@ -32,6 +32,10 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 FRAMEWORKS_DIR = Path(__file__).parent / 'frameworks'
 
+# Characters of the document sent to the model. Longer documents are truncated
+# and the result is flagged with `document_truncated` so the UI can warn.
+EXCERPT_CHARS = 12000
+
 FRAMEWORK_FILES = {
     'nist_csf':  'nist_csf.json',
     'iso_27001': 'iso_27001.json',
@@ -143,7 +147,7 @@ def is_compliance_document(doc_text: str, client) -> bool:
 
 
 def build_prompt(doc_text: str, fw_name: str, controls: list) -> str:
-    excerpt = doc_text[:12000]
+    excerpt = doc_text[:EXCERPT_CHARS]
     slim    = [{'id': c['id'], 'name': c['name']} for c in controls]
     return (
         f"You are a senior GRC analyst specializing in cybersecurity compliance.\n\n"
@@ -181,15 +185,104 @@ def parse_gemini(raw: str) -> list:
     return json.loads(text[s:e])
 
 
-def compute_score(results: list) -> tuple:
-    n = len(results)
-    if not n:
-        return 0, 0, 0, 0
+VALID_STATUSES = {'met', 'partial', 'missing'}
+
+# Min length of a quote fragment to count as a meaningful match
+_MIN_FRAGMENT = 12
+
+
+def _normalize(text: str) -> str:
+    """Lowercase, unify quotes/dashes, drop markdown markers, collapse whitespace."""
+    text = text.lower()
+    text = text.translate(str.maketrans({
+        '‘': "'", '’': "'", '“': '"', '”': '"',
+        '–': '-', '—': '-', ' ': ' ',
+    }))
+    text = re.sub(r'^\s*(#{1,6}|[-*•·])\s+', ' ', text, flags=re.MULTILINE)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def verify_evidence(quote, doc_norm: str):
+    """
+    Check that the quote the model cited actually exists in the document.
+    Returns True / False, or None when there is no quote to verify.
+    Quotes shortened with '...' are split and every fragment must match.
+    """
+    if not quote or str(quote).strip().lower() == 'none':
+        return None
+    q = _normalize(str(quote)).strip(' "\'')
+    fragments = [f.strip(' "\'') for f in re.split(r'\.\.\.|…', q)]
+    fragments = [f for f in fragments if len(f) >= _MIN_FRAGMENT]
+    if not fragments:
+        return False
+    return all(f in doc_norm for f in fragments)
+
+
+def _id_key(control_id) -> str:
+    """
+    Canonical form of a control ID so cosmetic variations from the model still
+    match the framework: 'A.5.15' / '5.15', 'GV.OC-1' / 'GV.OC-01', ' cc6 ' / 'CC6'.
+    """
+    k = str(control_id).strip().upper()
+    k = re.sub(r'^(ANNEX\s*)?A[\.\s]+(?=\d)', '', k)   # ISO 'A.5.15' -> '5.15'
+    k = re.sub(r'(?<!\d)0+(?=\d)', '', k)              # drop leading zeros per segment
+    return re.sub(r'\s+', '', k)
+
+
+def reconcile_results(results: list, controls: list, doc_text: str) -> tuple:
+    """
+    Make the model output safe to score:
+      - drop control IDs that don't exist in the framework (hallucinated IDs)
+      - drop duplicates and invalid statuses
+      - verify every evidence quote against the full document
+      - list every framework control the model did not report as 'not addressed'
+    """
+    by_key   = {_id_key(c['id']): c for c in controls}
+    doc_norm = _normalize(doc_text)
+    clean, seen, dropped = [], set(), 0
+
+    for r in results:
+        ctrl = by_key.get(_id_key(r.get('control_id', '')))
+        status = str(r.get('status', '')).strip().lower()
+        if ctrl is None or ctrl['id'] in seen or status not in VALID_STATUSES:
+            dropped += 1
+            continue
+        cid = ctrl['id']
+        seen.add(cid)
+        r['status']            = status
+        r['control_id']        = cid
+        r['control_name']      = ctrl['name']   # trust the framework, not the model
+        r['category']          = ctrl.get('category', '')
+        r['evidence_verified'] = verify_evidence(r.get('evidence_found'), doc_norm)
+        clean.append(r)
+
+    not_addressed = [
+        {'control_id': c['id'], 'control_name': c['name'], 'category': c.get('category', '')}
+        for c in controls if c['id'] not in seen
+    ]
+    return clean, not_addressed, dropped
+
+
+def compute_score(results: list, framework_total: int) -> dict:
+    """
+    Score over the WHOLE framework: controls the policy doesn't address count
+    as gaps. Scoring only the controls the model returned inflates the result
+    (a policy covering 10 of 93 controls could otherwise score 90%+).
+    """
     met     = sum(1 for c in results if c.get('status') == 'met')
     partial = sum(1 for c in results if c.get('status') == 'partial')
     missing = sum(1 for c in results if c.get('status') == 'missing')
-    score   = round((met + partial * 0.5) / n * 100, 1)
-    return score, met, partial, missing
+    total   = framework_total or 1
+    return {
+        'score':          round((met + partial * 0.5) / total * 100, 1),
+        'met':            met,
+        'partial':        partial,
+        'missing':        missing,
+        'not_addressed':  framework_total - len(results),
+        'total':          framework_total,
+        'coverage':       round(len(results) / total * 100, 1),
+        'unverified':     sum(1 for c in results if c.get('evidence_verified') is False),
+    }
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -258,7 +351,6 @@ def analyze():
         fw_data  = load_framework(key)
         fw_name  = fw_data.get('framework', {}).get('name', key)
         controls = normalize_controls(key, fw_data)
-        cat_map  = {c['id']: c.get('category', '') for c in controls}
 
         prompt = build_prompt(doc_text, fw_name, controls)
         resp   = client.models.generate_content(
@@ -270,41 +362,24 @@ def analyze():
             ),
         )
 
-        results = parse_gemini(resp.text)
-
-        for ctrl in results:
-            ctrl['category'] = cat_map.get(ctrl.get('control_id', ''), '')
-
-        score, met, partial, missing = compute_score(results)
+        raw_results = parse_gemini(resp.text)
+        results, not_addressed, dropped = reconcile_results(raw_results, controls, doc_text)
+        if dropped:
+            app.logger.warning('Dropped %d invalid/duplicate control entries from model output', dropped)
 
         analysis_result = {
-            'success':        True,
-            'framework_name': fw_name,
-            'framework_key':  key,
-            'analysis_date':  datetime.now().strftime('%B %d, %Y at %H:%M'),
-            'score':          score,
-            'met':            met,
-            'partial':        partial,
-            'missing':        missing,
-            'total':          len(results),
-            'controls':       results,
+            'success':           True,
+            'framework_name':    fw_name,
+            'framework_key':     key,
+            'analysis_date':     datetime.now().strftime('%B %d, %Y at %H:%M'),
+            **compute_score(results, len(controls)),
+            'controls':          results,
+            'not_addressed_controls': not_addressed,
+            'document_truncated': len(doc_text) > EXCERPT_CHARS,
         }
         _analysis_cache[analysis_key] = analysis_result
 
-        return jsonify({
-            'success':        True,
-            'framework_name': fw_name,
-            'framework_key':  key,
-            'document_name':  file.filename,
-            'analysis_date':  datetime.now().strftime('%B %d, %Y at %H:%M'),
-            'score':          score,
-            'met':            met,
-            'partial':        partial,
-            'missing':        missing,
-            'total':          len(results),
-            'controls':       results,
-            'cached':         False,
-        })
+        return jsonify({**analysis_result, 'document_name': file.filename, 'cached': False})
 
     except json.JSONDecodeError as e:
         app.logger.error('Gemini raw response: %s', getattr(e, 'doc', str(e)))
@@ -382,16 +457,18 @@ def export_pdf():
     met   = data.get('met',     0)
     part  = data.get('partial', 0)
     miss  = data.get('missing', 0)
+    nadd  = data.get('not_addressed', 0)
     score = data.get('score',   0)
     pct   = lambda n: f"{round(n / total * 100, 1)}%"
 
     sum_rows = [
-        ['Status',                  'Controls',  'Percentage'],
-        ['Met (Compliant)',          str(met),    pct(met)],
-        ['Partial (Needs Work)',     str(part),   pct(part)],
-        ['Missing (Gap)',            str(miss),   pct(miss)],
-        ['Total Assessed',           str(total),  '100%'],
-        ['Overall Compliance Score', '',          f'{score}%'],
+        ['Status',                      'Controls',  'Percentage'],
+        ['Met (Compliant)',              str(met),    pct(met)],
+        ['Partial (Needs Work)',         str(part),   pct(part)],
+        ['Missing (Gap)',                str(miss),   pct(miss)],
+        ['Not Addressed in Document',    str(nadd),   pct(nadd)],
+        ['Total Framework Controls',     str(total),  '100%'],
+        ['Overall Compliance Score',     '',          f'{score}%'],
     ]
     st = Table(sum_rows, colWidths=[2.6*inch, 1.1*inch, 1.5*inch])
     st.setStyle(TableStyle([
@@ -404,14 +481,32 @@ def export_pdf():
         ('BACKGROUND',    (0,1), (-1,1),  colors.HexColor('#e8f5e9')),
         ('BACKGROUND',    (0,2), (-1,2),  colors.HexColor('#fffde7')),
         ('BACKGROUND',    (0,3), (-1,3),  colors.HexColor('#ffebee')),
-        ('BACKGROUND',    (0,4), (-1,4),  colors.HexColor('#f5f5f5')),
-        ('BACKGROUND',    (0,5), (-1,5),  colors.HexColor('#e3f2fd')),
-        ('FONTNAME',      (0,5), (-1,5),  'Helvetica-Bold'),
+        ('BACKGROUND',    (0,4), (-1,4),  colors.HexColor('#eeeeee')),
+        ('BACKGROUND',    (0,5), (-1,5),  colors.HexColor('#f5f5f5')),
+        ('BACKGROUND',    (0,6), (-1,6),  colors.HexColor('#e3f2fd')),
+        ('FONTNAME',      (0,6), (-1,6),  'Helvetica-Bold'),
         ('TOPPADDING',    (0,0), (-1,-1), 5),
         ('BOTTOMPADDING', (0,0), (-1,-1), 5),
         ('LEFTPADDING',   (0,0), (-1,-1), 8),
     ]))
-    story += [st, Spacer(1, 14)]
+    story += [st, Spacer(1, 6)]
+
+    caveats = [
+        f"Score is calculated over all {total} framework controls; controls the "
+        f"document does not address count as gaps. Coverage: {data.get('coverage', 0)}%."
+    ]
+    if data.get('unverified'):
+        caveats.append(
+            f"{data['unverified']} evidence quote(s) could not be matched to the source "
+            f"document and are marked [UNVERIFIED]; review them manually.")
+    if data.get('document_truncated'):
+        caveats.append(
+            "The document exceeded the analysis limit and was truncated; "
+            "later sections were not assessed.")
+    for txt in caveats:
+        story.append(Paragraph(f"• {safe_str(txt)}",
+            ps('Cav' + txt[:6], fontSize=7.5, textColor=GREY, leading=10)))
+    story.append(Spacer(1, 14))
 
     # Controls detail
     story.append(Paragraph("Controls Assessment Detail",
@@ -456,6 +551,8 @@ def export_pdf():
         rec  = c.get('recommendation', 'none') or 'none'
 
         note = ev if ev != 'none' else ''
+        if note and c.get('evidence_verified') is False:
+            note = '[UNVERIFIED] ' + note
         if rec != 'none':
             note += (' | ' if note else '') + f'→ {rec}'
         if len(note) > 120:
@@ -464,7 +561,7 @@ def export_pdf():
         rows.append([
             Paragraph(safe_str(c.get('control_id', '')),
                 ps(f'ID{i}', fontSize=7.5, fontName='Courier')),
-            Paragraph(safe_str(c.get('control_name', ''))[:70], cel_s),
+            Paragraph(safe_str(c.get('control_name', '')[:70]), cel_s),
             Paragraph(safe_str(st_v).upper(),
                 ps(f'ST{i}', fontSize=7.5, fontName='Helvetica-Bold',
                    textColor=STATUS_FG.get(st_v, colors.black))),
@@ -490,6 +587,23 @@ def export_pdf():
     ] + row_styles))
     story.append(ct)
 
+    # Controls not addressed by the document (compact list)
+    nadd_list = data.get('not_addressed_controls', [])
+    if nadd_list:
+        story += [
+            Spacer(1, 14),
+            Paragraph(f"Controls Not Addressed in the Document ({len(nadd_list)})",
+                ps('H2b', fontSize=13, fontName='Helvetica-Bold',
+                   textColor=DARK, spaceAfter=4)),
+            Paragraph("No relevant content was found for these controls. Each one "
+                      "is a coverage gap to evaluate with the policy owner.",
+                ps('H2bs', fontSize=8, textColor=GREY, spaceAfter=6)),
+            Paragraph(", ".join(
+                f"<font name='Courier'>{safe_str(n.get('control_id', ''))}</font>"
+                for n in nadd_list),
+                ps('NA', fontSize=7.5, leading=11)),
+        ]
+
     # Recommendations
     action = [
         c for c in data.get('controls', [])
@@ -514,7 +628,7 @@ def export_pdf():
             hex_ = PRIO_HEX.get(pr, '333333')
             cid  = c.get('control_id', '')
             hdr  = Paragraph(
-                f"<b>[{safe_str(cid)}]</b> {safe_str(c.get('control_name',''))[:80]} "
+                f"<b>[{safe_str(cid)}]</b> {safe_str(c.get('control_name','')[:80])} "
                 f"— <font color='#{hex_}'>{safe_str(pr).upper()}</font> ({safe_str(stat)})",
                 ps(f'RH{idx}', fontSize=8.5, fontName='Helvetica-Bold', spaceAfter=2))
             body = Paragraph(

@@ -47,12 +47,12 @@ A manual gap analysis against a framework like NIST CSF 2.0 (106 subcategories),
 
 - **Multi-framework**: NIST CSF 2.0, ISO/IEC 27001:2022 Annex A, SOC 2 Trust Services Criteria.
 - **Pre-validation of the document** — rejects non-security documents before spending tokens on the analysis.
-- **Verbatim evidence quotes** from the document (≤150 chars per control) — auditor-friendly, no fabrication.
-- **Weighted compliance score**: `(met + 0.5·partial) / total · 100`.
+- **Verbatim evidence quotes** from the document (≤150 chars per control), **verified against the source text** — any quote the model cannot back up is flagged `UNVERIFIED` in the UI and the PDF instead of being presented as fact.
+- **Weighted compliance score over the whole framework**: `(met + 0.5·partial) / framework_controls · 100`, plus a separate **coverage** metric (how many controls the document addresses at all).
 - **Prioritized remediations** (high / medium / low) sorted by urgency in the report.
 - **In-memory caching** (SHA-256 of doc + framework key) — re-analyzing the same document is instant.
 - **Executive PDF export** with summary, per-control detail table, and a prioritized recommendations block.
-- **Zero-evidence filter**: the model only returns controls with actual findings, avoiding noise from trivially-missing controls.
+- **Output reconciliation**: control IDs the model invents or duplicates are dropped, and every framework control the model did not report is listed as *not addressed* — so the report always accounts for the full framework.
 - **Single-page UI** with smooth transitions (anime.js), dark theme, and Space Grotesk typography.
 
 ---
@@ -88,15 +88,15 @@ Frameworks live as declarative JSON files in `frameworks/` — adding a new one 
          │ ◀───────────────────────────────────── │ 2. SHA-256 hash → cache lookup
          │                                        │ 3. is_compliance_document?
          │                                        │ 4. build_prompt(controls)
-         │  POST /export-pdf                      │ 5. Haiku 4.5 Flash
-         │ ─────────────────────────────────────▶ │ 6. parse → JSON array
-         │  application/pdf                       │ 7. compute_score
+         │  POST /export-pdf                      │ 5. Gemini 2.5 Flash
+         │ ─────────────────────────────────────▶ │ 6. parse + reconcile
+         │  application/pdf                       │ 7. verify quotes, score
          │ ◀───────────────────────────────────── │ 8. cache + return
          │   (reportlab)                          │
                                                   ▼
                                         ┌──────────────────────┐
-                                        │  Claude  API   │
-                                        │  (Haiku/Sonnet)  │
+                                        │   Google Gemini API  │
+                                        │  (gemini-2.5-flash)  │
                                         └──────────────────────┘
 ```
 
@@ -109,11 +109,13 @@ Frameworks live as declarative JSON files in `frameworks/` — adding a new one 
 
 1. **Extraction** (`pdf_to_markdown`): the PDF is converted to lightweight Markdown — ALL-CAPS lines are promoted to `##`, Title Case to `###`, and bullets are normalized. This gives the LLM a hierarchical structure that's easier to map than flat text.
 2. **Hash + cache**: SHA-256 of the extracted text. If this document has already been analyzed against this framework, the cached result is returned immediately.
-3. **Relevance pre-filter**: before the expensive analysis, Claude is asked with `max_tokens=5` whether the document deals with infosec / compliance / privacy / governance. If the answer doesn't start with "YES", the request aborts with a clear error. This avoids spending 32K tokens analyzing a restaurant menu.
-4. **Analysis prompt** (`build_prompt`): the model receives a role ("senior GRC analyst"), a 12K-character excerpt of the document, the slimmed `{id, name}` list of controls, and a strict JSON contract for the output.
+3. **Relevance pre-filter**: before the expensive analysis, Gemini is asked with `max_tokens=5` whether the document deals with infosec / compliance / privacy / governance. If the answer doesn't start with "YES", the request aborts with a clear error. This avoids spending 32K tokens analyzing a restaurant menu.
+4. **Analysis prompt** (`build_prompt`): the model receives a role ("senior GRC analyst"), a 12K-character excerpt of the document (longer documents are flagged as truncated in the results), the slimmed `{id, name}` list of controls, and a strict JSON contract for the output.
 5. **Defensive parsing** (`parse`): code fences are stripped, the first `[` and last `]` are located, and `json.loads` runs on that slice. Resilient to the "thinking" preambles Gemini 2.5 sometimes emits.
-6. **Scoring**: `(met + 0.5 × partial) / total × 100`. Controls that the model omitted due to total absence of evidence don't penalize the score (design decision — see below).
-7. **PDF (`/export-pdf`)**: ReportLab renders a 4-section layout — meta header, executive summary, color-coded per-control detail table, and a recommendations block sorted by priority.
+6. **Reconciliation** (`reconcile_results`): control IDs are normalized (e.g. `A.5.15` → `5.15`, `GV.OC-1` → `GV.OC-01`), unknown or duplicated IDs are dropped, and the control name is taken from the framework file rather than from the model.
+7. **Evidence verification** (`verify_evidence`): each quote is normalized (case, whitespace, smart quotes, Markdown markers) and matched against the full document text. Quotes shortened with `...` must match fragment by fragment. Quotes that don't match are flagged `UNVERIFIED` — a basic guard against hallucinated citations.
+8. **Scoring**: `(met + 0.5 × partial) / framework_controls × 100`. Controls the document doesn't address count as gaps. Scoring only the controls the model returned would inflate the result: a policy covering 10 of 93 ISO controls could score above 90%. Coverage (`addressed / framework_controls`) is reported separately.
+9. **PDF (`/export-pdf`)**: ReportLab renders the meta header, executive summary (with scoring caveats), color-coded per-control detail table, the list of controls not addressed, and a recommendations block sorted by priority.
 
 <!-- ╔══════════════════════════════════════════════════════════╗
      ║  SCREENSHOT — Results view with score                    ║
@@ -129,7 +131,7 @@ Frameworks live as declarative JSON files in `frameworks/` — adding a new one 
 | Layer | Technology |
 |---|---|
 | **Backend** | Python 3.11+, Flask 3 |
-| **LLM** | Anthropic Claude Haiku 4.5  |
+| **LLM** | Google Gemini 2.5 Flash (`google-genai` SDK) |
 | **PDF in** | pypdf 4 |
 | **PDF out** | ReportLab 4 (Platypus) |
 | **Frontend** | Vanilla HTML/CSS/JS + anime.js for transitions |
@@ -198,4 +200,11 @@ Roadmap ideas:
 
 ---
 
-<sub>Built by E.Aldir Alcalá · 2026 · Questions or feedback: [LinkedIn](https://www.linkedin.com/in/aldiralcala/)</sub>
+## Credits
+
+- **Héctor Silva** ([@Hector2304](https://github.com/Hector2304)) — LLM integration (model selection, Gemini API), framework ingestion and normalization, backend, scoring and evidence verification.
+- **E. Aldir Alcalá** ([@21Aldir](https://github.com/21Aldir) · [LinkedIn](https://www.linkedin.com/in/aldiralcala/)) — GRC domain expertise: framework selection, versions, and assessment methodology.
+
+> Most of the early commits appear under Aldir's account because the initial development was done on his machine.
+
+<sub>2026</sub>
