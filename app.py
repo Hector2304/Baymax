@@ -238,7 +238,9 @@ def build_system_prompt(fw_name: str, controls: list) -> str:
 
 
 def analyze_with_claude(client, doc_text: str, fw_name: str, controls: list) -> list:
-    resp = client.messages.create(
+    # Streaming is required by the SDK for requests that could run >10 min
+    # (large max_tokens). We still wait for the complete message before parsing.
+    with client.messages.stream(
         model=ANTHROPIC_MODEL,
         max_tokens=ANTHROPIC_MAX_TOKENS,
         thinking={'type': 'adaptive' if ANTHROPIC_THINKING == 'adaptive' else 'disabled'},
@@ -252,7 +254,8 @@ def analyze_with_claude(client, doc_text: str, fw_name: str, controls: list) -> 
             f"<document>\n{doc_text[:EXCERPT_CHARS]}\n</document>"
         )}],
         output_config={'format': {'type': 'json_schema', 'schema': ANALYSIS_SCHEMA}},
-    )
+    ) as stream:
+        resp = stream.get_final_message()
     u = resp.usage
     app.logger.info('Claude usage: input=%s cache_read=%s cache_write=%s output=%s',
                     u.input_tokens, getattr(u, 'cache_read_input_tokens', 0),
