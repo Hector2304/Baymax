@@ -47,6 +47,7 @@ FRAMEWORK_FILES = {
     'nist_csf':  'nist_csf.json',
     'iso_27001': 'iso_27001.json',
     'soc2':      'soc2.json',
+    'nist_ir':   'nist_ir_profile.json',
 }
 
 # {doc_hash: True/False}  — resultado de validación
@@ -117,6 +118,20 @@ def normalize_controls(key: str, data: dict) -> list:
                 'name':        c.get('control_name', ''),
                 'description': c.get('description', ''),
                 'category':    c.get('category', ''),
+            })
+    elif key == 'nist_ir':
+        # Profile over CSF 2.0: statements come from the base framework,
+        # the profile only selects subcategories and tags their IR phase.
+        csf = {c['id']: c for c in normalize_controls('nist_csf', load_framework('nist_csf'))}
+        for sub in data.get('subcategories', []):
+            base = csf.get(sub['id'])
+            if not base:
+                continue
+            out.append({
+                'id':          sub['id'],
+                'name':        base['name'],
+                'description': f"CSF category: {base['category']}. IR life-cycle phase: {sub.get('phase', '')}.",
+                'category':    sub.get('phase', ''),
             })
     elif key == 'soc2':
         for c in data.get('criteria', []):
@@ -206,7 +221,7 @@ def is_compliance_document(doc_text: str, client) -> bool:
     return bool(_json_from_response(resp).get('is_security_document'))
 
 
-def build_system_prompt(fw_name: str, controls: list) -> str:
+def build_system_prompt(fw_name: str, controls: list, focus: str = '') -> str:
     """
     Static per framework: role, rules and the full control catalog.
     Sent as a cached system block, so repeated analyses against the same
@@ -219,7 +234,8 @@ def build_system_prompt(fw_name: str, controls: list) -> str:
     ]
     return (
         "You are a senior GRC analyst specializing in cybersecurity compliance. "
-        f"You assess security policy documents against the {fw_name} framework.\n\n"
+        f"You assess security policy documents against the {fw_name} framework.\n"
+        f"{focus}\n\n"
         f"<controls total=\"{len(controls)}\">\n{json.dumps(catalog, ensure_ascii=False)}\n</controls>\n\n"
         "Assessment rules:\n"
         "- Only report controls for which the document contains relevant content. "
@@ -237,7 +253,7 @@ def build_system_prompt(fw_name: str, controls: list) -> str:
     )
 
 
-def analyze_with_claude(client, doc_text: str, fw_name: str, controls: list) -> list:
+def analyze_with_claude(client, doc_text: str, fw_name: str, controls: list, focus: str = '') -> list:
     # Streaming is required by the SDK for requests that could run >10 min
     # (large max_tokens). We still wait for the complete message before parsing.
     with client.messages.stream(
@@ -246,7 +262,7 @@ def analyze_with_claude(client, doc_text: str, fw_name: str, controls: list) -> 
         thinking={'type': 'adaptive' if ANTHROPIC_THINKING == 'adaptive' else 'disabled'},
         system=[{
             'type': 'text',
-            'text': build_system_prompt(fw_name, controls),
+            'text': build_system_prompt(fw_name, controls, focus),
             'cache_control': {'type': 'ephemeral'},
         }],
         messages=[{'role': 'user', 'content': (
@@ -431,7 +447,8 @@ def analyze():
         fw_name  = fw_data.get('framework', {}).get('name', key)
         controls = normalize_controls(key, fw_data)
 
-        raw_results = analyze_with_claude(client, doc_text, fw_name, controls)
+        focus       = fw_data.get('framework', {}).get('assessment_focus', '')
+        raw_results = analyze_with_claude(client, doc_text, fw_name, controls, focus)
         results, not_addressed, dropped = reconcile_results(raw_results, controls, doc_text)
         if dropped:
             app.logger.warning('Dropped %d invalid/duplicate control entries from model output', dropped)
@@ -627,6 +644,9 @@ def export_pdf():
         rec  = c.get('recommendation', 'none') or 'none'
 
         note = ev if ev != 'none' else ''
+        if note and st_v == 'missing':
+            # For gaps the quote is context, not proof of compliance
+            note = 'Related text: ' + note
         if note and c.get('evidence_verified') is False:
             note = '[UNVERIFIED] ' + note
         if rec != 'none':
@@ -650,7 +670,7 @@ def export_pdf():
             ('BACKGROUND', (0, i), (-1, i), STATUS_BG.get(st_v, colors.white))
         )
 
-    cw = [0.65*inch, 1.85*inch, 0.72*inch, 0.72*inch, 2.7*inch]
+    cw = [0.85*inch, 1.75*inch, 0.72*inch, 0.72*inch, 2.6*inch]
     ct = Table(rows, colWidths=cw, repeatRows=1)
     ct.setStyle(TableStyle([
         ('BACKGROUND',    (0,0), (-1,0),  DARK),

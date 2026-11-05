@@ -3,7 +3,7 @@
 <img width="1200" height="637" alt="image" src="https://github.com/user-attachments/assets/6fc21f51-f329-4527-8d1e-ea774d666d5a" />
 
 
-> *Policy health check for GRC professionals.* Upload a security policy, pick a framework (NIST CSF 2.0, ISO/IEC 27001:2022, or SOC 2), and get a gap analysis with cited evidence, a compliance score, and prioritized remediation recommendations — all exportable to a polished executive PDF report.
+> *Policy health check for GRC professionals.* Upload a security policy, pick a framework (NIST CSF 2.0, ISO/IEC 27001:2022, SOC 2, or the NIST SP 800-61r3 Incident Response profile), and get a gap analysis with cited evidence, a compliance score, and prioritized remediation recommendations — all exportable to a polished executive PDF report.
 
 <!-- ╔══════════════════════════════════════════════════════════╗
      ║  SCREENSHOT — Hero / landing screen                      ║
@@ -45,7 +45,7 @@ A manual gap analysis against a framework like NIST CSF 2.0 (106 subcategories),
 
 ## Features
 
-- **Multi-framework**: NIST CSF 2.0, ISO/IEC 27001:2022 Annex A, SOC 2 Trust Services Criteria.
+- **Multi-framework**: NIST CSF 2.0, ISO/IEC 27001:2022 Annex A, SOC 2 Trust Services Criteria, and an **Incident Response readiness profile** based on NIST SP 800-61r3.
 - **Pre-validation of the document** — rejects non-security documents before spending tokens on the analysis.
 - **Verbatim evidence quotes** from the document (≤150 chars per control), **verified against the source text** — any quote the model cannot back up is flagged `UNVERIFIED` in the UI and the PDF instead of being presented as fact.
 - **Weighted compliance score over the whole framework**: `(met + 0.5·partial) / framework_controls · 100`, plus a separate **coverage** metric (how many controls the document addresses at all).
@@ -64,6 +64,19 @@ A manual gap analysis against a framework like NIST CSF 2.0 (106 subcategories),
 | **NIST Cybersecurity Framework** | CSF 2.0 (Feb 2024) | 6 functions · 22 categories · 106 subcategories | NIST CSWP 29 |
 | **ISO/IEC 27001** | 2022 (Annex A) | 93 controls | ISO/IEC 27001:2022 + 27002:2022 |
 | **SOC 2** | TSC 2017 (rev. 2022) | Common Criteria + additional categories | AICPA |
+| **Incident Response profile** | NIST SP 800-61 Rev. 3 (Apr 2025) | 40 CSF 2.0 subcategories, tagged by IR life-cycle phase | NIST SP 800-61r3 |
+
+### Incident Response profile (NIST SP 800-61r3)
+
+SP 800-61 Rev. 3 recasts incident response as a **CSF 2.0 Community Profile**: Govern, Identify and Protect support *preparation*; Detect, Respond and Recover cover *incident response*; and Identify › Improvement (ID.IM) captures *lessons learned*.
+
+Baymax's IR profile reuses the CSF 2.0 statements and selects:
+
+- every **Detect**, **Respond** and **Recover** subcategory (all rated High priority for incident response),
+- the **Improvement** category (ID.IM-01 to ID.IM-04),
+- the preparation subcategories confirmed as High priority: **ID.RA-02, ID.RA-05, ID.RA-06, PR.DS-11**.
+
+Each control is tagged with its life-cycle phase (Preparation, Detection & Analysis, Response, Recovery, Lessons Learned), so the domain breakdown shows readiness **by phase**. The model is also instructed to assess the policy from an incident-response-readiness perspective. Medium/Low-priority preparation subcategories from the publication's Table 2 are not included yet (see `notes` in the JSON).
 
 Frameworks live as declarative JSON files in `frameworks/` — adding a new one is a matter of writing the file and registering its key in `FRAMEWORK_FILES`.
 
@@ -198,7 +211,8 @@ Baymax/
 ├── frameworks/
 │   ├── nist_csf.json         # NIST CSF 2.0 — 106 subcategories
 │   ├── iso_27001.json        # ISO/IEC 27001:2022 — 93 controls
-│   └── soc2.json             # SOC 2 TSC
+│   ├── soc2.json             # SOC 2 TSC
+│   └── nist_ir_profile.json  # SP 800-61r3 IR profile (subset of CSF 2.0)
 ├── templates/
 │   └── index.html            # SPA — every screen lives in one HTML file
 ├── static/

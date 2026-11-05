@@ -1,0 +1,218 @@
+{
+  "framework": {
+    "name": "NIST SP 800-61r3 Incident Response Profile (CSF 2.0)",
+    "version": "SP 800-61 Rev. 3 (April 2025)",
+    "source": "NIST SP 800-61 Rev. 3 — Incident Response Recommendations and Considerations for Cybersecurity Risk Management: A CSF 2.0 Community Profile",
+    "source_url": "https://csrc.nist.gov/pubs/sp/800/61/r3/final",
+    "base_framework": "nist_csf",
+    "notes": [
+      "Control statements are taken from nist_csf.json (CSF 2.0); this file only selects subcategories and tags them with an incident response life-cycle phase.",
+      "Included: every Detect, Respond and Recover subcategory, the Identify > Improvement category (ID.IM), and the preparation subcategories confirmed as High priority (ID.RA-02, ID.RA-05, ID.RA-06, PR.DS-11).",
+      "SP 800-61r3 rates further Govern/Identify/Protect subcategories as Medium or Low for incident response. They are not included yet; add them after reviewing Table 2 of the publication.",
+      "Phase mapping follows the publication's correspondence between the Rev. 2 life cycle and CSF 2.0 Functions: Govern/Identify/Protect = Preparation, Detect = Detection & Analysis, Respond/Recover = Response and Recovery, ID.IM = Lessons Learned."
+    ],
+    "assessment_focus": "Assess the document from an incident response readiness perspective: how well it prepares the organization to detect, analyze, contain, eradicate and recover from cybersecurity incidents, and to learn from them."
+  },
+  "subcategories": [
+    {
+      "id": "ID.RA-02",
+      "phase": "Preparation",
+      "ir_priority": "high"
+    },
+    {
+      "id": "ID.RA-05",
+      "phase": "Preparation",
+      "ir_priority": "high"
+    },
+    {
+      "id": "ID.RA-06",
+      "phase": "Preparation",
+      "ir_priority": "high"
+    },
+    {
+      "id": "PR.DS-11",
+      "phase": "Preparation",
+      "ir_priority": "high"
+    },
+    {
+      "id": "ID.IM-01",
+      "phase": "Lessons Learned & Improvement",
+      "ir_priority": null
+    },
+    {
+      "id": "ID.IM-02",
+      "phase": "Lessons Learned & Improvement",
+      "ir_priority": "high"
+    },
+    {
+      "id": "ID.IM-03",
+      "phase": "Lessons Learned & Improvement",
+      "ir_priority": "high"
+    },
+    {
+      "id": "ID.IM-04",
+      "phase": "Lessons Learned & Improvement",
+      "ir_priority": "high"
+    },
+    {
+      "id": "DE.CM-01",
+      "phase": "Detection & Analysis",
+      "ir_priority": "high"
+    },
+    {
+      "id": "DE.CM-02",
+      "phase": "Detection & Analysis",
+      "ir_priority": "high"
+    },
+    {
+      "id": "DE.CM-03",
+      "phase": "Detection & Analysis",
+      "ir_priority": "high"
+    },
+    {
+      "id": "DE.CM-06",
+      "phase": "Detection & Analysis",
+      "ir_priority": "high"
+    },
+    {
+      "id": "DE.CM-09",
+      "phase": "Detection & Analysis",
+      "ir_priority": "high"
+    },
+    {
+      "id": "DE.AE-02",
+      "phase": "Detection & Analysis",
+      "ir_priority": "high"
+    },
+    {
+      "id": "DE.AE-03",
+      "phase": "Detection & Analysis",
+      "ir_priority": "high"
+    },
+    {
+      "id": "DE.AE-04",
+      "phase": "Detection & Analysis",
+      "ir_priority": "high"
+    },
+    {
+      "id": "DE.AE-06",
+      "phase": "Detection & Analysis",
+      "ir_priority": "high"
+    },
+    {
+      "id": "DE.AE-07",
+      "phase": "Detection & Analysis",
+      "ir_priority": "high"
+    },
+    {
+      "id": "DE.AE-08",
+      "phase": "Detection & Analysis",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RS.MA-01",
+      "phase": "Response",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RS.MA-02",
+      "phase": "Response",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RS.MA-03",
+      "phase": "Response",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RS.MA-04",
+      "phase": "Response",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RS.MA-05",
+      "phase": "Response",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RS.AN-03",
+      "phase": "Response",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RS.AN-06",
+      "phase": "Response",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RS.AN-07",
+      "phase": "Response",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RS.AN-08",
+      "phase": "Response",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RS.CO-02",
+      "phase": "Response",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RS.CO-03",
+      "phase": "Response",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RS.MI-01",
+      "phase": "Response",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RS.MI-02",
+      "phase": "Response",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RC.RP-01",
+      "phase": "Recovery",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RC.RP-02",
+      "phase": "Recovery",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RC.RP-03",
+      "phase": "Recovery",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RC.RP-04",
+      "phase": "Recovery",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RC.RP-05",
+      "phase": "Recovery",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RC.RP-06",
+      "phase": "Recovery",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RC.CO-03",
+      "phase": "Recovery",
+      "ir_priority": "high"
+    },
+    {
+      "id": "RC.CO-04",
+      "phase": "Recovery",
+      "ir_priority": "high"
+    }
+  ]
+}
