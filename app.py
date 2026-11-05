@@ -185,7 +185,6 @@ def is_compliance_document(doc_text: str, client) -> bool:
     resp = client.messages.create(
         model=ANTHROPIC_MODEL,
         max_tokens=50,
-        temperature=0,
         messages=[{'role': 'user', 'content': (
             "Does the following document relate to any of these topics: "
             "information security, cybersecurity, IT governance, risk management, "
@@ -233,7 +232,6 @@ def analyze_with_claude(client, doc_text: str, fw_name: str, controls: list) -> 
     resp = client.messages.create(
         model=ANTHROPIC_MODEL,
         max_tokens=ANTHROPIC_MAX_TOKENS,
-        temperature=0,
         system=[{
             'type': 'text',
             'text': build_system_prompt(fw_name, controls),
