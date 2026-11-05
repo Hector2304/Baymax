@@ -7,11 +7,11 @@ import html
 from datetime import datetime
 from pathlib import Path
 import io
+import logging
 
 from flask import Flask, request, jsonify, render_template, send_file
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types as genai_types
+import anthropic
 from pypdf import PdfReader
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -26,15 +26,22 @@ from reportlab.lib.enums import TA_CENTER
 load_dotenv()
 
 app = Flask(__name__)
+app.logger.setLevel(logging.INFO)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+ANTHROPIC_API_KEY    = os.getenv('ANTHROPIC_API_KEY')
+ANTHROPIC_MODEL      = os.getenv('ANTHROPIC_MODEL', 'claude-haiku-5-5')
+ANTHROPIC_MAX_TOKENS = int(os.getenv('ANTHROPIC_MAX_TOKENS', '16000'))
+# 'disabled' (default) or 'adaptive'. Thinking tokens count toward max_tokens,
+# so with adaptive thinking raise ANTHROPIC_MAX_TOKENS accordingly.
+ANTHROPIC_THINKING   = os.getenv('ANTHROPIC_THINKING', 'disabled').strip().lower()
 FRAMEWORKS_DIR = Path(__file__).parent / 'frameworks'
 
-# Characters of the document sent to the model. Longer documents are truncated
-# and the result is flagged with `document_truncated` so the UI can warn.
-EXCERPT_CHARS = 12000
+# Characters of the document sent to the model (~4 chars per token, so ~50K
+# tokens). Keeps the full prompt under 100K input tokens, where Haiku pricing
+# jumps. Longer documents are truncated and flagged with `document_truncated`.
+EXCERPT_CHARS = 200_000
 
 FRAMEWORK_FILES = {
     'nist_csf':  'nist_csf.json',
@@ -122,67 +129,138 @@ def normalize_controls(key: str, data: dict) -> list:
     return out
 
 
-# ─── Gemini helpers ───────────────────────────────────────────────────────────
+# ─── LLM (Claude API) ─────────────────────────────────────────────────────────
+
+# Strict output contract: the API guarantees the response matches this schema,
+# so there is no free-text JSON to clean up. Enums are compared
+# case-insensitively downstream, as the docs recommend.
+ANALYSIS_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'controls': {
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'control_id':       {'type': 'string'},
+                    'status':           {'type': 'string', 'enum': ['met', 'partial', 'missing']},
+                    'compliance_level': {'type': 'integer', 'description': '0-100'},
+                    'evidence_found':   {'type': 'string'},
+                    'recommendation':   {'type': 'string'},
+                    'confidence_score': {'type': 'number', 'description': '0.0-1.0'},
+                    'priority':         {'type': 'string', 'enum': ['high', 'medium', 'low']},
+                },
+                'required': ['control_id', 'status', 'compliance_level', 'evidence_found',
+                             'recommendation', 'confidence_score', 'priority'],
+                'additionalProperties': False,
+            },
+        },
+    },
+    'required': ['controls'],
+    'additionalProperties': False,
+}
+
+RELEVANCE_SCHEMA = {
+    'type': 'object',
+    'properties': {'is_security_document': {'type': 'boolean'}},
+    'required': ['is_security_document'],
+    'additionalProperties': False,
+}
+
+
+class ModelOutputError(Exception):
+    """The model response could not be used (refusal, truncation, bad JSON)."""
+
+
+def _json_from_response(resp) -> dict:
+    if resp.stop_reason == 'max_tokens':
+        tail = next((b.text for b in resp.content if b.type == 'text'), '')[-400:]
+        app.logger.warning('Output truncated at max_tokens. Block types: %s. Last 400 chars: %r',
+                           [b.type for b in resp.content], tail)
+        raise ModelOutputError(
+            'The model ran out of output tokens. Raise ANTHROPIC_MAX_TOKENS or use a shorter document.')
+    if resp.stop_reason == 'refusal':
+        raise ModelOutputError('The model declined to analyze this document.')
+    text = next((b.text for b in resp.content if b.type == 'text'), '')
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        app.logger.error('Unparseable model output: %s', text[:500])
+        raise ModelOutputError('The model returned unparseable output. Please try again.') from e
+
 
 def is_compliance_document(doc_text: str, client) -> bool:
-    snippet = doc_text[:1500]
-    prompt  = (
-        "Does the following document relate to any of these topics: "
-        "information security, cybersecurity, IT governance, risk management, "
-        "compliance, data protection, access control, audit, privacy, or "
-        "organizational security controls?\n"
-        "Answer only YES or NO.\n\n"
-        f"DOCUMENT:\n---\n{snippet}\n---"
+    resp = client.messages.create(
+        model=ANTHROPIC_MODEL,
+        max_tokens=256,
+        thinking={'type': 'disabled'},   # a yes/no classification needs no reasoning
+        messages=[{'role': 'user', 'content': (
+            "Does the following document relate to any of these topics: "
+            "information security, cybersecurity, IT governance, risk management, "
+            "compliance, data protection, access control, audit, privacy, or "
+            "organizational security controls?\n\n"
+            f"<document>\n{doc_text[:1500]}\n</document>"
+        )}],
+        output_config={'format': {'type': 'json_schema', 'schema': RELEVANCE_SCHEMA}},
     )
-    resp = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=prompt,
-        config=genai_types.GenerateContentConfig(
-            temperature=0.0,
-            max_output_tokens=5,
-        ),
-    )
-    text = resp.text or ''
-    return text.strip().upper().startswith('YES')
+    return bool(_json_from_response(resp).get('is_security_document'))
 
 
-def build_prompt(doc_text: str, fw_name: str, controls: list) -> str:
-    excerpt = doc_text[:EXCERPT_CHARS]
-    slim    = [{'id': c['id'], 'name': c['name']} for c in controls]
+def build_system_prompt(fw_name: str, controls: list) -> str:
+    """
+    Static per framework: role, rules and the full control catalog.
+    Sent as a cached system block, so repeated analyses against the same
+    framework only pay full price for the document itself.
+    """
+    catalog = [
+        {k: v for k, v in {'id': c['id'], 'name': c['name'],
+                           'description': c.get('description', '')}.items() if v}
+        for c in controls
+    ]
     return (
-        f"You are a senior GRC analyst specializing in cybersecurity compliance.\n\n"
-        f"TASK: Analyze the policy document (formatted as Markdown) against the {fw_name} framework controls.\n\n"
-        f"POLICY DOCUMENT:\n---\n{excerpt}\n---\n\n"
-        f"CONTROLS TO ASSESS ({len(controls)} total):\n"
-        f"{json.dumps(slim)}\n\n"
+        "You are a senior GRC analyst specializing in cybersecurity compliance. "
+        f"You assess security policy documents against the {fw_name} framework.\n\n"
+        f"<controls total=\"{len(controls)}\">\n{json.dumps(catalog, ensure_ascii=False)}\n</controls>\n\n"
         "Assessment rules:\n"
-        '- "status": "met" | "partial" | "missing"\n'
-        '- "compliance_level": integer 0-100 (100 = fully compliant)\n'
-        '- "evidence_found": direct quote from the document (<=150 chars) or "none"\n'
-        '- "recommendation": specific actionable remediation step, or "none" if met\n'
-        '- "confidence_score": float 0.0-1.0 reflecting certainty of your assessment\n'
-        '- "priority": "high" | "medium" | "low"\n\n'
-        "IMPORTANT: SKIP controls where no evidence or findings exist (zero evidence). "
-        "Only include controls where you found something relevant in the document.\n\n"
-        "Return ONLY a raw JSON array with no markdown, no code fences, no explanation:\n"
-        '[{"control_id":"...","control_name":"...","status":"met|partial|missing",'
-        '"compliance_level":0,"evidence_found":"...","recommendation":"...","confidence_score":0.0,"priority":"high|medium|low"},...]\n\n'
-        "Return the array now:"
+        "- Only report controls for which the document contains relevant content. "
+        "Skip controls with zero evidence; they are handled separately as 'not addressed'.\n"
+        "- control_id: copy the id exactly as it appears in <controls>.\n"
+        "- status: met (fully addressed), partial (addressed with gaps), missing "
+        "(the document touches the topic but the control requirement is clearly absent).\n"
+        "- compliance_level: integer 0-100.\n"
+        "- evidence_found: an exact, verbatim quote copied from the document (max 150 characters). "
+        "Do not paraphrase; quotes are automatically checked against the source text. "
+        "Use \"none\" only if there is no quotable text.\n"
+        "- recommendation: one specific, actionable remediation step, or \"none\" if met.\n"
+        "- confidence_score: 0.0-1.0, your certainty in the assessment.\n"
+        "- priority: high, medium or low, based on risk if the gap is not remediated."
     )
 
 
-def parse_gemini(raw: str) -> list:
-    text = raw.strip()
-    # quita bloques de código markdown
-    text = re.sub(r'```json\s*', '', text)
-    text = re.sub(r'```\s*',     '', text)
-    text = text.strip()
-    # extrae solo el array JSON (ignora thinking/preamble de Gemini 2.5)
-    s = text.find('[')
-    e = text.rfind(']') + 1
-    if s == -1 or e <= s:
-        raise json.JSONDecodeError('No JSON array found', text, 0)
-    return json.loads(text[s:e])
+def analyze_with_claude(client, doc_text: str, fw_name: str, controls: list) -> list:
+    # Streaming is required by the SDK for requests that could run >10 min
+    # (large max_tokens). We still wait for the complete message before parsing.
+    with client.messages.stream(
+        model=ANTHROPIC_MODEL,
+        max_tokens=ANTHROPIC_MAX_TOKENS,
+        thinking={'type': 'adaptive' if ANTHROPIC_THINKING == 'adaptive' else 'disabled'},
+        system=[{
+            'type': 'text',
+            'text': build_system_prompt(fw_name, controls),
+            'cache_control': {'type': 'ephemeral'},
+        }],
+        messages=[{'role': 'user', 'content': (
+            "Assess this policy document (converted to Markdown):\n\n"
+            f"<document>\n{doc_text[:EXCERPT_CHARS]}\n</document>"
+        )}],
+        output_config={'format': {'type': 'json_schema', 'schema': ANALYSIS_SCHEMA}},
+    ) as stream:
+        resp = stream.get_final_message()
+    u = resp.usage
+    app.logger.info('Claude usage: input=%s cache_read=%s cache_write=%s output=%s',
+                    u.input_tokens, getattr(u, 'cache_read_input_tokens', 0),
+                    getattr(u, 'cache_creation_input_tokens', 0), u.output_tokens)
+    return _json_from_response(resp).get('controls', [])
 
 
 VALID_STATUSES = {'met', 'partial', 'missing'}
@@ -250,6 +328,7 @@ def reconcile_results(results: list, controls: list, doc_text: str) -> tuple:
         cid = ctrl['id']
         seen.add(cid)
         r['status']            = status
+        r['priority']          = str(r.get('priority', 'medium')).strip().lower()
         r['control_id']        = cid
         r['control_name']      = ctrl['name']   # trust the framework, not the model
         r['category']          = ctrl.get('category', '')
@@ -309,8 +388,8 @@ def analyze():
     if ext not in ('.pdf', '.txt'):
         return jsonify({'error': 'Only PDF and TXT files are supported'}), 400
 
-    if not GEMINI_API_KEY:
-        return jsonify({'error': 'GEMINI_API_KEY is not configured in .env'}), 500
+    if not ANTHROPIC_API_KEY:
+        return jsonify({'error': 'ANTHROPIC_API_KEY is not configured in .env'}), 500
 
     tmp = Path(app.config['UPLOAD_FOLDER']) / f"{uuid.uuid4()}{ext}"
     try:
@@ -331,7 +410,7 @@ def analyze():
             cached = _analysis_cache[analysis_key]
             return jsonify({**cached, 'document_name': file.filename, 'cached': True})
 
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
         # ── Cache hit: ya sabemos que NO es compliance ────────────────────────
         if doc_hash in _validation_cache and not _validation_cache[doc_hash]:
@@ -352,17 +431,7 @@ def analyze():
         fw_name  = fw_data.get('framework', {}).get('name', key)
         controls = normalize_controls(key, fw_data)
 
-        prompt = build_prompt(doc_text, fw_name, controls)
-        resp   = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(
-                temperature=0,
-                max_output_tokens=32768,
-            ),
-        )
-
-        raw_results = parse_gemini(resp.text)
+        raw_results = analyze_with_claude(client, doc_text, fw_name, controls)
         results, not_addressed, dropped = reconcile_results(raw_results, controls, doc_text)
         if dropped:
             app.logger.warning('Dropped %d invalid/duplicate control entries from model output', dropped)
@@ -372,6 +441,7 @@ def analyze():
             'framework_name':    fw_name,
             'framework_key':     key,
             'analysis_date':     datetime.now().strftime('%B %d, %Y at %H:%M'),
+            'model':             ANTHROPIC_MODEL,
             **compute_score(results, len(controls)),
             'controls':          results,
             'not_addressed_controls': not_addressed,
@@ -381,9 +451,15 @@ def analyze():
 
         return jsonify({**analysis_result, 'document_name': file.filename, 'cached': False})
 
-    except json.JSONDecodeError as e:
-        app.logger.error('Gemini raw response: %s', getattr(e, 'doc', str(e)))
-        return jsonify({'error': 'AI returned unparseable JSON. Please try again.'}), 500
+    except ModelOutputError as e:
+        return jsonify({'error': str(e)}), 502
+    except anthropic.AuthenticationError:
+        return jsonify({'error': 'Invalid ANTHROPIC_API_KEY.'}), 500
+    except anthropic.RateLimitError:
+        return jsonify({'error': 'Claude API rate limit reached. Wait a moment and try again.'}), 429
+    except anthropic.APIError as e:
+        app.logger.error('Claude API error: %s', e)
+        return jsonify({'error': f'Claude API error: {getattr(e, "message", str(e))}'}), 502
     except Exception as e:
         return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
     finally:
