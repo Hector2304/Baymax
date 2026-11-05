@@ -35,26 +35,6 @@
       "ir_priority": "high"
     },
     {
-      "id": "ID.IM-01",
-      "phase": "Lessons Learned & Improvement",
-      "ir_priority": null
-    },
-    {
-      "id": "ID.IM-02",
-      "phase": "Lessons Learned & Improvement",
-      "ir_priority": "high"
-    },
-    {
-      "id": "ID.IM-03",
-      "phase": "Lessons Learned & Improvement",
-      "ir_priority": "high"
-    },
-    {
-      "id": "ID.IM-04",
-      "phase": "Lessons Learned & Improvement",
-      "ir_priority": "high"
-    },
-    {
       "id": "DE.CM-01",
       "phase": "Detection & Analysis",
       "ir_priority": "high"
@@ -212,6 +192,26 @@
     {
       "id": "RC.CO-04",
       "phase": "Recovery",
+      "ir_priority": "high"
+    },
+    {
+      "id": "ID.IM-01",
+      "phase": "Lessons Learned & Improvement",
+      "ir_priority": null
+    },
+    {
+      "id": "ID.IM-02",
+      "phase": "Lessons Learned & Improvement",
+      "ir_priority": "high"
+    },
+    {
+      "id": "ID.IM-03",
+      "phase": "Lessons Learned & Improvement",
+      "ir_priority": "high"
+    },
+    {
+      "id": "ID.IM-04",
+      "phase": "Lessons Learned & Improvement",
       "ir_priority": "high"
     }
   ]

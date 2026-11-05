@@ -73,12 +73,17 @@
     /* ── Nav dots ──────────────────────────────────────────── */
     #nav-dots {
       position: fixed;
-      bottom: 24px;
+      bottom: 18px;
       left: 50%;
       transform: translateX(-50%);
       display: flex;
       gap: 8px;
       z-index: 100;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      box-shadow: 0 0 0 6px var(--bg);
     }
     .nav-dot {
       width: 6px; height: 6px;
@@ -162,12 +167,11 @@
     /* ═══════════════════════════════════════════════════════
        SCREEN 2 — UPLOAD
     ═══════════════════════════════════════════════════════ */
+    /* The whole screen scrolls (wheel works anywhere, scrollbar at the window
+       edge); the content column is centered with padding instead of max-width. */
     #screen-upload {
-      padding: 44px 52px 100px;
+      padding: 44px max(52px, calc((100% - 676px) / 2)) 110px;
       overflow-y: auto;
-      max-width: 780px;
-      margin: 0 auto;
-      width: 100%;
     }
     .eyebrow {
       display: flex;
@@ -365,12 +369,33 @@
        SCREEN 4 — RESULTS
     ═══════════════════════════════════════════════════════ */
     #screen-results {
-      padding: 44px 52px 100px;
+      padding: 44px max(52px, calc((100% - 796px) / 2)) 110px;
       overflow-y: auto;
-      max-width: 900px;
-      margin: 0 auto;
-      width: 100%;
     }
+    @media (max-width: 600px) {
+      #screen-upload, #screen-results { padding-left: 20px; padding-right: 20px; }
+    }
+    .results-topbar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; margin-bottom: 14px;
+    }
+    .btn-back {
+      font-family: var(--mono); font-size: 11px; letter-spacing: .05em;
+      color: var(--fg2); background: transparent;
+      border: 1px solid var(--border2); border-radius: var(--radius);
+      padding: 7px 12px; cursor: pointer;
+      transition: color .2s, border-color .2s, background .2s;
+    }
+    .btn-back:hover { color: var(--fg); border-color: var(--fg2); background: var(--bg2); }
+    .btn-new {
+      width: 100%; margin-top: 10px;
+      font-family: var(--mono); font-size: 12px; letter-spacing: .05em;
+      color: var(--fg2); background: transparent;
+      border: 1px dashed var(--border2); border-radius: var(--radius);
+      padding: 15px; cursor: pointer;
+      transition: color .2s, border-color .2s;
+    }
+    .btn-new:hover { color: var(--fg); border-color: var(--fg2); }
     .results-eyebrow {
       font-family: var(--mono);
       font-size: 10px;
@@ -702,7 +727,10 @@
      SCREEN 4 — RESULTS
 ════════════════════════════════════════ -->
 <div id="screen-results" class="screen">
-  <div class="results-eyebrow">✓ Analysis complete</div>
+  <div class="results-topbar">
+    <div class="results-eyebrow" style="margin-bottom:0">✓ Analysis complete</div>
+    <button class="btn-back" id="btn-back" title="Back to document and framework selection">← New analysis</button>
+  </div>
   <div class="results-header">
     <div class="score-display">
       <div class="score-number" id="score-number">0</div>
@@ -741,6 +769,7 @@
   </div>
 
   <button class="btn-export" id="btn-export">Export PDF Report →</button>
+  <button class="btn-new" id="btn-new">← Analyze another document or framework</button>
 </div>
 
 <!-- NAV DOTS -->
@@ -782,6 +811,14 @@ const STATUSES   = [
 function goTo(index, dir = 1) {
   const from = document.getElementById(SCREEN_IDS[currentScreen]);
   const to   = document.getElementById(SCREEN_IDS[index]);
+  to.scrollTop = 0;
+  if (index === 0) {
+    // the intro "book" was opened (pages slid out); close it again
+    ['#page-left', '#page-right'].forEach(sel => {
+      const el = document.querySelector(sel);
+      if (el) el.style.transform = '';
+    });
+  }
 
   anime({
     targets: from,
@@ -993,7 +1030,11 @@ function renderResults(data) {
     domains[cat].count++;
   });
 
-  document.getElementById('domain-bars').innerHTML = Object.entries(domains).map(([cat, d]) => {
+  const order = data.category_order || [];
+  const rank  = cat => { const i = order.indexOf(cat); return i === -1 ? order.length : i; };
+  document.getElementById('domain-bars').innerHTML = Object.entries(domains)
+    .sort(([a], [b]) => rank(a) - rank(b))
+    .map(([cat, d]) => {
     const pct = Math.round(d.score / d.count);
     const col = pct >= 70 ? 'var(--green)' : pct >= 40 ? 'var(--yellow)' : 'var(--red)';
     return `
@@ -1102,6 +1143,14 @@ document.getElementById('btn-export').addEventListener('click', async () => {
     btn.disabled = false;
   }
 });
+
+// ═══════════════════════════════════════════════════════
+// BACK TO ANALYZER — keeps the selected file and framework so the user can
+// re-run the same document against another framework, or swap the document
+// ═══════════════════════════════════════════════════════
+['btn-back', 'btn-new'].forEach(id =>
+  document.getElementById(id).addEventListener('click', () => goTo(1, -1))
+);
 
 // ═══════════════════════════════════════════════════════
 // NAV DOTS — click to navigate back
