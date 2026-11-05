@@ -3,6 +3,7 @@ import json
 import uuid
 import re
 import hashlib
+import difflib
 import html
 from datetime import datetime
 from pathlib import Path
@@ -301,20 +302,92 @@ def _normalize(text: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 
-def verify_evidence(quote, doc_norm: str):
+# A quote is 'approximate' when at least this share of its words appear, in
+# order, within a window of the document not much longer than the quote itself.
+_APPROX_MIN_WORDS = 0.85
+_APPROX_MAX_SPAN = 1.6
+
+
+class DocIndex:
+    """Normalized document text plus a word-trigram index for fuzzy lookups."""
+    def __init__(self, doc_text: str):
+        self.norm   = _normalize(doc_text)
+        self.tokens = re.findall(r'\w+', self.norm)
+        self.trigrams: dict[tuple, list[int]] = {}
+        for i in range(len(self.tokens) - 2):
+            self.trigrams.setdefault(tuple(self.tokens[i:i + 3]), []).append(i)
+
+
+def _fragment_match(fragment: str, doc: 'DocIndex') -> str:
+    if fragment in doc.norm:
+        return 'exact'
+    q = re.findall(r'\w+', fragment)
+    if not q:
+        return 'not_found'
+    if len(q) < 4:
+        # Short fragment (e.g. the part before '...'): its words must appear in
+        # order within a small window.
+        limit = len(q) * 3
+        for start, tok in enumerate(doc.tokens):
+            if tok != q[0]:
+                continue
+            j, k = 1, start + 1
+            while j < len(q) and k < start + limit:
+                if doc.tokens[k] == q[j]:
+                    j += 1
+                k += 1
+            if j == len(q):
+                return 'approximate'
+        return 'not_found'
+    # Candidate windows: wherever any 3-word sequence of the quote appears.
+    starts = set()
+    for i in range(len(q) - 2):
+        for pos in doc.trigrams.get(tuple(q[i:i + 3]), [])[:50]:
+            starts.add(max(0, pos - i))
+    for st in sorted(starts)[:300]:
+        window = doc.tokens[max(0, st - 3): st + int(len(q) * _APPROX_MAX_SPAN) + 3]
+        blocks = [b for b in difflib.SequenceMatcher(None, q, window, autojunk=False)
+                  .get_matching_blocks() if b.size]
+        if not blocks:
+            continue
+        matched = sum(b.size for b in blocks)
+        span    = (blocks[-1].b + blocks[-1].size) - blocks[0].b
+        if matched / len(q) >= _APPROX_MIN_WORDS and span <= len(q) * _APPROX_MAX_SPAN:
+            return 'approximate'
+    return 'not_found'
+
+
+def match_evidence(quote, doc: 'DocIndex'):
     """
-    Check that the quote the model cited actually exists in the document.
-    Returns True / False, or None when there is no quote to verify.
-    Quotes shortened with '...' are split and every fragment must match.
+    Check the quote the model cited against the document.
+      'exact'       – appears verbatim (after normalization)
+      'approximate' – same words in the same order with small omissions or
+                      additions (e.g. '"X," in this policy, means' quoted as 'X means')
+      'not_found'   – could not be located; possibly fabricated
+      None          – no quote given
+    Quotes shortened with '...' are split; every fragment must match.
     """
     if not quote or str(quote).strip().lower() == 'none':
         return None
     q = _normalize(str(quote)).strip(' "\'')
-    fragments = [f.strip(' "\'') for f in re.split(r'\.\.\.|…', q)]
+    fragments = [f.strip(' "\'') for f in re.split(r'\.\.\.|\u2026', q)]
     fragments = [f for f in fragments if len(f) >= _MIN_FRAGMENT]
     if not fragments:
-        return False
-    return all(f in doc_norm for f in fragments)
+        return 'not_found'
+    results = [_fragment_match(f, doc) for f in fragments]
+    if 'not_found' in results:
+        return 'not_found'
+    return 'approximate' if 'approximate' in results else 'exact'
+
+
+def verify_evidence(quote, doc_norm: str):
+    """Backwards-compatible exact check: True / False / None."""
+    if not quote or str(quote).strip().lower() == 'none':
+        return None
+    q = _normalize(str(quote)).strip(' "\'')
+    fragments = [f.strip(' "\'') for f in re.split(r'\.\.\.|\u2026', q)]
+    fragments = [f for f in fragments if len(f) >= _MIN_FRAGMENT]
+    return bool(fragments) and all(f in doc_norm for f in fragments)
 
 
 def _id_key(control_id) -> str:
@@ -337,7 +410,7 @@ def reconcile_results(results: list, controls: list, doc_text: str) -> tuple:
       - list every framework control the model did not report as 'not addressed'
     """
     by_key   = {_id_key(c['id']): c for c in controls}
-    doc_norm = _normalize(doc_text)
+    doc_idx  = DocIndex(doc_text)
     clean, seen, dropped = [], set(), 0
 
     for r in results:
@@ -353,7 +426,9 @@ def reconcile_results(results: list, controls: list, doc_text: str) -> tuple:
         r['control_id']        = cid
         r['control_name']      = ctrl['name']   # trust the framework, not the model
         r['category']          = ctrl.get('category', '')
-        r['evidence_verified'] = verify_evidence(r.get('evidence_found'), doc_norm)
+        r['evidence_match']    = match_evidence(r.get('evidence_found'), doc_idx)
+        # False only when the quote could not be located at all
+        r['evidence_verified'] = None if r['evidence_match'] is None else r['evidence_match'] != 'not_found'
         clean.append(r)
 
     not_addressed = [
@@ -386,7 +461,8 @@ def compute_score(results: list, framework_total: int) -> dict:
         'total':          framework_total,
         'addressed':      addressed,
         'coverage':       round(addressed / total * 100, 1),
-        'unverified':     sum(1 for c in results if c.get('evidence_verified') is False),
+        'unverified':     sum(1 for c in results if c.get('evidence_match') == 'not_found'),
+        'approximate':    sum(1 for c in results if c.get('evidence_match') == 'approximate'),
     }
 
 
@@ -603,6 +679,10 @@ def export_pdf():
         caveats.append(
             f"{data['unverified']} evidence quote(s) could not be matched to the source "
             f"document and are marked [UNVERIFIED]; review them manually.")
+    if data.get('approximate'):
+        caveats.append(
+            f"{data['approximate']} quote(s) are marked [APPROX.]: the wording matches the "
+            f"document with minor omissions or additions, not verbatim.")
     if data.get('document_truncated'):
         caveats.append(
             "The document exceeded the analysis limit and was truncated; "
@@ -658,8 +738,10 @@ def export_pdf():
         if note and st_v == 'missing':
             # For gaps the quote is context, not proof of compliance
             note = 'Related text: ' + note
-        if note and c.get('evidence_verified') is False:
+        if note and c.get('evidence_match') == 'not_found':
             note = '[UNVERIFIED] ' + note
+        elif note and c.get('evidence_match') == 'approximate':
+            note = '[APPROX.] ' + note
         if rec != 'none':
             note += (' | ' if note else '') + f'→ {rec}'
         if len(note) > 120:

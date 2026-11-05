@@ -522,6 +522,7 @@
       padding: 1px 6px; margin-right: 6px; border-radius: 3px;
       background: var(--yellow-bg); color: var(--yellow);
     }
+    .ev-flag.approx { background: var(--bg-secondary); color: var(--fg2); }
     .results-note { font-family: var(--mono); font-size: 10px; color: var(--yellow); margin-top: 6px; line-height: 1.5; }
 
     /* Controls the document does not address */
@@ -1015,8 +1016,10 @@ function renderResults(data) {
         <div class="control-body">
           <div class="control-id">${escHtml(c.control_id)}</div>
           <div class="control-name">${escHtml(c.control_name)}</div>
-          ${ev  ? `<div class="control-ev">${c.status === 'missing' ? 'Related text: ' : ''}${c.evidence_verified === false
+          ${ev  ? `<div class="control-ev">${c.status === 'missing' ? 'Related text: ' : ''}${c.evidence_match === 'not_found'
                     ? '<span class="ev-flag" title="This quote was not found in the source document">unverified</span>'
+                    : c.evidence_match === 'approximate'
+                    ? '<span class="ev-flag approx" title="Same wording as the document with minor omissions or additions">approx.</span>'
                     : ''}"${escHtml(ev)}"</div>` : ''}
           ${rec ? `<div class="control-rec">→ ${escHtml(rec)}</div>` : ''}
         </div>
