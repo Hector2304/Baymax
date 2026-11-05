@@ -536,6 +536,9 @@ def analyze():
         focus       = fw_data.get('framework', {}).get('assessment_focus', '')
         raw_results = analyze_with_claude(client, doc_text, fw_name, controls, focus)
         results, not_addressed, dropped = reconcile_results(raw_results, controls, doc_text)
+        # Present findings in framework order, not in the order the model returned them
+        position = {c['id']: i for i, c in enumerate(controls)}
+        results.sort(key=lambda r: position.get(r['control_id'], len(position)))
         if dropped:
             app.logger.warning('Dropped %d invalid/duplicate control entries from model output', dropped)
 
@@ -548,6 +551,8 @@ def analyze():
             **compute_score(results, len(controls)),
             'controls':          results,
             'not_addressed_controls': not_addressed,
+            # Framework order of categories (IR profile: life-cycle order)
+            'category_order':    list(dict.fromkeys(c.get('category', '') for c in controls)),
             'document_truncated': len(doc_text) > EXCERPT_CHARS,
         }
         _analysis_cache[analysis_key] = analysis_result
