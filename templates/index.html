@@ -978,7 +978,7 @@ function renderResults(data) {
     <div class="meta-row">Framework <span>${escHtml(data.framework_name || '')}</span></div>
     <div class="meta-row">Document  <span>${escHtml(data.document_name  || '')}</span></div>
     <div class="meta-row">Date      <span>${escHtml(data.analysis_date  || '')}</span></div>
-    <div class="meta-row">Coverage  <span>${controls.length} of ${fwTotal} controls addressed (${data.coverage ?? 0}%)</span></div>
+    <div class="meta-row">Coverage  <span>${data.addressed ?? controls.length} of ${fwTotal} controls have related text (${data.coverage ?? 0}%)</span></div>
     ${data.cached ? '<div class="meta-row" style="color:var(--green)">⚡ cached</div>' : ''}
     ${notes.map(n => `<div class="results-note">${escHtml(n)}</div>`).join('')}
   `;

@@ -293,6 +293,11 @@ def _normalize(text: str) -> str:
         '–': '-', '—': '-', ' ': ' ',
     }))
     text = re.sub(r'^\s*(#{1,6}|[-*•·])\s+', ' ', text, flags=re.MULTILINE)
+    # Quote marks are dropped entirely: policies often write definitions as
+    # '"Incident" means ...' and the model tends to quote them without the marks.
+    text = re.sub(r'["\'`]', '', text)
+    # Re-join words hyphenated across PDF line breaks ('secu-\nrity').
+    text = re.sub(r'(\w)-\s+(\w)', r'\1\2', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 
@@ -367,6 +372,10 @@ def compute_score(results: list, framework_total: int) -> dict:
     met     = sum(1 for c in results if c.get('status') == 'met')
     partial = sum(1 for c in results if c.get('status') == 'partial')
     missing = sum(1 for c in results if c.get('status') == 'missing')
+    # 'Addressed' = the document has related text for the control. A 'missing'
+    # finding with no quote is a gap the model inferred, not coverage.
+    addressed = sum(1 for c in results
+                    if str(c.get('evidence_found', '')).strip().lower() not in ('', 'none'))
     total   = framework_total or 1
     return {
         'score':          round((met + partial * 0.5) / total * 100, 1),
@@ -375,7 +384,8 @@ def compute_score(results: list, framework_total: int) -> dict:
         'missing':        missing,
         'not_addressed':  framework_total - len(results),
         'total':          framework_total,
-        'coverage':       round(len(results) / total * 100, 1),
+        'addressed':      addressed,
+        'coverage':       round(addressed / total * 100, 1),
         'unverified':     sum(1 for c in results if c.get('evidence_verified') is False),
     }
 
@@ -586,7 +596,8 @@ def export_pdf():
 
     caveats = [
         f"Score is calculated over all {total} framework controls; controls the "
-        f"document does not address count as gaps. Coverage: {data.get('coverage', 0)}%."
+        f"document does not address count as gaps. Coverage (controls with related "
+        f"text in the document): {data.get('coverage', 0)}%."
     ]
     if data.get('unverified'):
         caveats.append(
