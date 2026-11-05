@@ -156,6 +156,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 # Optional
 ANTHROPIC_MODEL=claude-haiku-5-5      # e.g. claude-sonnet-5-5 for harder documents
 ANTHROPIC_MAX_TOKENS=16000
+ANTHROPIC_THINKING=disabled           # 'adaptive' lets the model reason first (uses more output tokens)
 ```
 
 Then run `python app.py` and open http://localhost:5000.

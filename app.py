@@ -33,6 +33,9 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 ANTHROPIC_API_KEY    = os.getenv('ANTHROPIC_API_KEY')
 ANTHROPIC_MODEL      = os.getenv('ANTHROPIC_MODEL', 'claude-haiku-5-5')
 ANTHROPIC_MAX_TOKENS = int(os.getenv('ANTHROPIC_MAX_TOKENS', '16000'))
+# 'disabled' (default) or 'adaptive'. Thinking tokens count toward max_tokens,
+# so with adaptive thinking raise ANTHROPIC_MAX_TOKENS accordingly.
+ANTHROPIC_THINKING   = os.getenv('ANTHROPIC_THINKING', 'disabled').strip().lower()
 FRAMEWORKS_DIR = Path(__file__).parent / 'frameworks'
 
 # Characters of the document sent to the model (~4 chars per token, so ~50K
@@ -189,7 +192,8 @@ def _json_from_response(resp) -> dict:
 def is_compliance_document(doc_text: str, client) -> bool:
     resp = client.messages.create(
         model=ANTHROPIC_MODEL,
-        max_tokens=50,
+        max_tokens=256,
+        thinking={'type': 'disabled'},   # a yes/no classification needs no reasoning
         messages=[{'role': 'user', 'content': (
             "Does the following document relate to any of these topics: "
             "information security, cybersecurity, IT governance, risk management, "
@@ -237,6 +241,7 @@ def analyze_with_claude(client, doc_text: str, fw_name: str, controls: list) -> 
     resp = client.messages.create(
         model=ANTHROPIC_MODEL,
         max_tokens=ANTHROPIC_MAX_TOKENS,
+        thinking={'type': 'adaptive' if ANTHROPIC_THINKING == 'adaptive' else 'disabled'},
         system=[{
             'type': 'text',
             'text': build_system_prompt(fw_name, controls),
