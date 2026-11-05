@@ -3,6 +3,7 @@ import json
 import uuid
 import re
 import hashlib
+import difflib
 import html
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +48,7 @@ FRAMEWORK_FILES = {
     'nist_csf':  'nist_csf.json',
     'iso_27001': 'iso_27001.json',
     'soc2':      'soc2.json',
+    'nist_ir':   'nist_ir_profile.json',
 }
 
 # {doc_hash: True/False}  — resultado de validación
@@ -117,6 +119,20 @@ def normalize_controls(key: str, data: dict) -> list:
                 'name':        c.get('control_name', ''),
                 'description': c.get('description', ''),
                 'category':    c.get('category', ''),
+            })
+    elif key == 'nist_ir':
+        # Profile over CSF 2.0: statements come from the base framework,
+        # the profile only selects subcategories and tags their IR phase.
+        csf = {c['id']: c for c in normalize_controls('nist_csf', load_framework('nist_csf'))}
+        for sub in data.get('subcategories', []):
+            base = csf.get(sub['id'])
+            if not base:
+                continue
+            out.append({
+                'id':          sub['id'],
+                'name':        base['name'],
+                'description': f"CSF category: {base['category']}. IR life-cycle phase: {sub.get('phase', '')}.",
+                'category':    sub.get('phase', ''),
             })
     elif key == 'soc2':
         for c in data.get('criteria', []):
@@ -206,7 +222,7 @@ def is_compliance_document(doc_text: str, client) -> bool:
     return bool(_json_from_response(resp).get('is_security_document'))
 
 
-def build_system_prompt(fw_name: str, controls: list) -> str:
+def build_system_prompt(fw_name: str, controls: list, focus: str = '') -> str:
     """
     Static per framework: role, rules and the full control catalog.
     Sent as a cached system block, so repeated analyses against the same
@@ -219,7 +235,8 @@ def build_system_prompt(fw_name: str, controls: list) -> str:
     ]
     return (
         "You are a senior GRC analyst specializing in cybersecurity compliance. "
-        f"You assess security policy documents against the {fw_name} framework.\n\n"
+        f"You assess security policy documents against the {fw_name} framework.\n"
+        f"{focus}\n\n"
         f"<controls total=\"{len(controls)}\">\n{json.dumps(catalog, ensure_ascii=False)}\n</controls>\n\n"
         "Assessment rules:\n"
         "- Only report controls for which the document contains relevant content. "
@@ -237,7 +254,7 @@ def build_system_prompt(fw_name: str, controls: list) -> str:
     )
 
 
-def analyze_with_claude(client, doc_text: str, fw_name: str, controls: list) -> list:
+def analyze_with_claude(client, doc_text: str, fw_name: str, controls: list, focus: str = '') -> list:
     # Streaming is required by the SDK for requests that could run >10 min
     # (large max_tokens). We still wait for the complete message before parsing.
     with client.messages.stream(
@@ -246,7 +263,7 @@ def analyze_with_claude(client, doc_text: str, fw_name: str, controls: list) -> 
         thinking={'type': 'adaptive' if ANTHROPIC_THINKING == 'adaptive' else 'disabled'},
         system=[{
             'type': 'text',
-            'text': build_system_prompt(fw_name, controls),
+            'text': build_system_prompt(fw_name, controls, focus),
             'cache_control': {'type': 'ephemeral'},
         }],
         messages=[{'role': 'user', 'content': (
@@ -277,23 +294,100 @@ def _normalize(text: str) -> str:
         '–': '-', '—': '-', ' ': ' ',
     }))
     text = re.sub(r'^\s*(#{1,6}|[-*•·])\s+', ' ', text, flags=re.MULTILINE)
+    # Quote marks are dropped entirely: policies often write definitions as
+    # '"Incident" means ...' and the model tends to quote them without the marks.
+    text = re.sub(r'["\'`]', '', text)
+    # Re-join words hyphenated across PDF line breaks ('secu-\nrity').
+    text = re.sub(r'(\w)-\s+(\w)', r'\1\2', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 
-def verify_evidence(quote, doc_norm: str):
+# A quote is 'approximate' when at least this share of its words appear, in
+# order, within a window of the document not much longer than the quote itself.
+_APPROX_MIN_WORDS = 0.85
+_APPROX_MAX_SPAN = 1.6
+
+
+class DocIndex:
+    """Normalized document text plus a word-trigram index for fuzzy lookups."""
+    def __init__(self, doc_text: str):
+        self.norm   = _normalize(doc_text)
+        self.tokens = re.findall(r'\w+', self.norm)
+        self.trigrams: dict[tuple, list[int]] = {}
+        for i in range(len(self.tokens) - 2):
+            self.trigrams.setdefault(tuple(self.tokens[i:i + 3]), []).append(i)
+
+
+def _fragment_match(fragment: str, doc: 'DocIndex') -> str:
+    if fragment in doc.norm:
+        return 'exact'
+    q = re.findall(r'\w+', fragment)
+    if not q:
+        return 'not_found'
+    if len(q) < 4:
+        # Short fragment (e.g. the part before '...'): its words must appear in
+        # order within a small window.
+        limit = len(q) * 3
+        for start, tok in enumerate(doc.tokens):
+            if tok != q[0]:
+                continue
+            j, k = 1, start + 1
+            while j < len(q) and k < start + limit:
+                if doc.tokens[k] == q[j]:
+                    j += 1
+                k += 1
+            if j == len(q):
+                return 'approximate'
+        return 'not_found'
+    # Candidate windows: wherever any 3-word sequence of the quote appears.
+    starts = set()
+    for i in range(len(q) - 2):
+        for pos in doc.trigrams.get(tuple(q[i:i + 3]), [])[:50]:
+            starts.add(max(0, pos - i))
+    for st in sorted(starts)[:300]:
+        window = doc.tokens[max(0, st - 3): st + int(len(q) * _APPROX_MAX_SPAN) + 3]
+        blocks = [b for b in difflib.SequenceMatcher(None, q, window, autojunk=False)
+                  .get_matching_blocks() if b.size]
+        if not blocks:
+            continue
+        matched = sum(b.size for b in blocks)
+        span    = (blocks[-1].b + blocks[-1].size) - blocks[0].b
+        if matched / len(q) >= _APPROX_MIN_WORDS and span <= len(q) * _APPROX_MAX_SPAN:
+            return 'approximate'
+    return 'not_found'
+
+
+def match_evidence(quote, doc: 'DocIndex'):
     """
-    Check that the quote the model cited actually exists in the document.
-    Returns True / False, or None when there is no quote to verify.
-    Quotes shortened with '...' are split and every fragment must match.
+    Check the quote the model cited against the document.
+      'exact'       – appears verbatim (after normalization)
+      'approximate' – same words in the same order with small omissions or
+                      additions (e.g. '"X," in this policy, means' quoted as 'X means')
+      'not_found'   – could not be located; possibly fabricated
+      None          – no quote given
+    Quotes shortened with '...' are split; every fragment must match.
     """
     if not quote or str(quote).strip().lower() == 'none':
         return None
     q = _normalize(str(quote)).strip(' "\'')
-    fragments = [f.strip(' "\'') for f in re.split(r'\.\.\.|…', q)]
+    fragments = [f.strip(' "\'') for f in re.split(r'\.\.\.|\u2026', q)]
     fragments = [f for f in fragments if len(f) >= _MIN_FRAGMENT]
     if not fragments:
-        return False
-    return all(f in doc_norm for f in fragments)
+        return 'not_found'
+    results = [_fragment_match(f, doc) for f in fragments]
+    if 'not_found' in results:
+        return 'not_found'
+    return 'approximate' if 'approximate' in results else 'exact'
+
+
+def verify_evidence(quote, doc_norm: str):
+    """Backwards-compatible exact check: True / False / None."""
+    if not quote or str(quote).strip().lower() == 'none':
+        return None
+    q = _normalize(str(quote)).strip(' "\'')
+    fragments = [f.strip(' "\'') for f in re.split(r'\.\.\.|\u2026', q)]
+    fragments = [f for f in fragments if len(f) >= _MIN_FRAGMENT]
+    return bool(fragments) and all(f in doc_norm for f in fragments)
 
 
 def _id_key(control_id) -> str:
@@ -316,7 +410,7 @@ def reconcile_results(results: list, controls: list, doc_text: str) -> tuple:
       - list every framework control the model did not report as 'not addressed'
     """
     by_key   = {_id_key(c['id']): c for c in controls}
-    doc_norm = _normalize(doc_text)
+    doc_idx  = DocIndex(doc_text)
     clean, seen, dropped = [], set(), 0
 
     for r in results:
@@ -332,7 +426,9 @@ def reconcile_results(results: list, controls: list, doc_text: str) -> tuple:
         r['control_id']        = cid
         r['control_name']      = ctrl['name']   # trust the framework, not the model
         r['category']          = ctrl.get('category', '')
-        r['evidence_verified'] = verify_evidence(r.get('evidence_found'), doc_norm)
+        r['evidence_match']    = match_evidence(r.get('evidence_found'), doc_idx)
+        # False only when the quote could not be located at all
+        r['evidence_verified'] = None if r['evidence_match'] is None else r['evidence_match'] != 'not_found'
         clean.append(r)
 
     not_addressed = [
@@ -351,6 +447,10 @@ def compute_score(results: list, framework_total: int) -> dict:
     met     = sum(1 for c in results if c.get('status') == 'met')
     partial = sum(1 for c in results if c.get('status') == 'partial')
     missing = sum(1 for c in results if c.get('status') == 'missing')
+    # 'Addressed' = the document has related text for the control. A 'missing'
+    # finding with no quote is a gap the model inferred, not coverage.
+    addressed = sum(1 for c in results
+                    if str(c.get('evidence_found', '')).strip().lower() not in ('', 'none'))
     total   = framework_total or 1
     return {
         'score':          round((met + partial * 0.5) / total * 100, 1),
@@ -359,8 +459,10 @@ def compute_score(results: list, framework_total: int) -> dict:
         'missing':        missing,
         'not_addressed':  framework_total - len(results),
         'total':          framework_total,
-        'coverage':       round(len(results) / total * 100, 1),
-        'unverified':     sum(1 for c in results if c.get('evidence_verified') is False),
+        'addressed':      addressed,
+        'coverage':       round(addressed / total * 100, 1),
+        'unverified':     sum(1 for c in results if c.get('evidence_match') == 'not_found'),
+        'approximate':    sum(1 for c in results if c.get('evidence_match') == 'approximate'),
     }
 
 
@@ -431,7 +533,8 @@ def analyze():
         fw_name  = fw_data.get('framework', {}).get('name', key)
         controls = normalize_controls(key, fw_data)
 
-        raw_results = analyze_with_claude(client, doc_text, fw_name, controls)
+        focus       = fw_data.get('framework', {}).get('assessment_focus', '')
+        raw_results = analyze_with_claude(client, doc_text, fw_name, controls, focus)
         results, not_addressed, dropped = reconcile_results(raw_results, controls, doc_text)
         if dropped:
             app.logger.warning('Dropped %d invalid/duplicate control entries from model output', dropped)
@@ -569,12 +672,17 @@ def export_pdf():
 
     caveats = [
         f"Score is calculated over all {total} framework controls; controls the "
-        f"document does not address count as gaps. Coverage: {data.get('coverage', 0)}%."
+        f"document does not address count as gaps. Coverage (controls with related "
+        f"text in the document): {data.get('coverage', 0)}%."
     ]
     if data.get('unverified'):
         caveats.append(
             f"{data['unverified']} evidence quote(s) could not be matched to the source "
             f"document and are marked [UNVERIFIED]; review them manually.")
+    if data.get('approximate'):
+        caveats.append(
+            f"{data['approximate']} quote(s) are marked [APPROX.]: the wording matches the "
+            f"document with minor omissions or additions, not verbatim.")
     if data.get('document_truncated'):
         caveats.append(
             "The document exceeded the analysis limit and was truncated; "
@@ -627,8 +735,13 @@ def export_pdf():
         rec  = c.get('recommendation', 'none') or 'none'
 
         note = ev if ev != 'none' else ''
-        if note and c.get('evidence_verified') is False:
+        if note and st_v == 'missing':
+            # For gaps the quote is context, not proof of compliance
+            note = 'Related text: ' + note
+        if note and c.get('evidence_match') == 'not_found':
             note = '[UNVERIFIED] ' + note
+        elif note and c.get('evidence_match') == 'approximate':
+            note = '[APPROX.] ' + note
         if rec != 'none':
             note += (' | ' if note else '') + f'→ {rec}'
         if len(note) > 120:
@@ -650,7 +763,7 @@ def export_pdf():
             ('BACKGROUND', (0, i), (-1, i), STATUS_BG.get(st_v, colors.white))
         )
 
-    cw = [0.65*inch, 1.85*inch, 0.72*inch, 0.72*inch, 2.7*inch]
+    cw = [0.85*inch, 1.75*inch, 0.72*inch, 0.72*inch, 2.6*inch]
     ct = Table(rows, colWidths=cw, repeatRows=1)
     ct.setStyle(TableStyle([
         ('BACKGROUND',    (0,0), (-1,0),  DARK),

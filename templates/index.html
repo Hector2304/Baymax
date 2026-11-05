@@ -253,7 +253,7 @@
     /* Framework grid */
     .framework-grid {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(2, 1fr);
       gap: 10px;
       margin-bottom: 28px;
     }
@@ -522,6 +522,7 @@
       padding: 1px 6px; margin-right: 6px; border-radius: 3px;
       background: var(--yellow-bg); color: var(--yellow);
     }
+    .ev-flag.approx { background: var(--bg-secondary); color: var(--fg2); }
     .results-note { font-family: var(--mono); font-size: 10px; color: var(--yellow); margin-top: 6px; line-height: 1.5; }
 
     /* Controls the document does not address */
@@ -657,7 +658,13 @@
     <div class="framework-card" data-key="soc2">
       <div class="fw-badge">AICPA</div>
       <div class="fw-name">SOC 2</div>
-      <div class="fw-sub">22 criteria</div>
+      <div class="fw-sub">23 criteria</div>
+      <div class="fw-check">✓</div>
+    </div>
+    <div class="framework-card" data-key="nist_ir">
+      <div class="fw-badge">NIST SP 800-61r3</div>
+      <div class="fw-name">Incident Response</div>
+      <div class="fw-sub">40 CSF subcategories · IR profile</div>
       <div class="fw-check">✓</div>
     </div>
   </div>
@@ -928,6 +935,7 @@ function startLoading() {
 
   const fwLabel = selectedFw === 'nist_csf' ? 'NIST CSF'
                 : selectedFw === 'iso_27001' ? 'ISO 27001'
+                : selectedFw === 'nist_ir' ? 'NIST IR profile'
                 : 'SOC 2';
   const statusEl = document.getElementById('loading-status');
   let i = 0;
@@ -971,7 +979,7 @@ function renderResults(data) {
     <div class="meta-row">Framework <span>${escHtml(data.framework_name || '')}</span></div>
     <div class="meta-row">Document  <span>${escHtml(data.document_name  || '')}</span></div>
     <div class="meta-row">Date      <span>${escHtml(data.analysis_date  || '')}</span></div>
-    <div class="meta-row">Coverage  <span>${controls.length} of ${fwTotal} controls addressed (${data.coverage ?? 0}%)</span></div>
+    <div class="meta-row">Coverage  <span>${data.addressed ?? controls.length} of ${fwTotal} controls have related text (${data.coverage ?? 0}%)</span></div>
     ${data.cached ? '<div class="meta-row" style="color:var(--green)">⚡ cached</div>' : ''}
     ${notes.map(n => `<div class="results-note">${escHtml(n)}</div>`).join('')}
   `;
@@ -1008,8 +1016,10 @@ function renderResults(data) {
         <div class="control-body">
           <div class="control-id">${escHtml(c.control_id)}</div>
           <div class="control-name">${escHtml(c.control_name)}</div>
-          ${ev  ? `<div class="control-ev">${c.evidence_verified === false
+          ${ev  ? `<div class="control-ev">${c.status === 'missing' ? 'Related text: ' : ''}${c.evidence_match === 'not_found'
                     ? '<span class="ev-flag" title="This quote was not found in the source document">unverified</span>'
+                    : c.evidence_match === 'approximate'
+                    ? '<span class="ev-flag approx" title="Same wording as the document with minor omissions or additions">approx.</span>'
                     : ''}"${escHtml(ev)}"</div>` : ''}
           ${rec ? `<div class="control-rec">→ ${escHtml(rec)}</div>` : ''}
         </div>
