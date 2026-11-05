@@ -7,6 +7,7 @@ import html
 from datetime import datetime
 from pathlib import Path
 import io
+import logging
 
 from flask import Flask, request, jsonify, render_template, send_file
 from dotenv import load_dotenv
@@ -25,6 +26,7 @@ from reportlab.lib.enums import TA_CENTER
 load_dotenv()
 
 app = Flask(__name__)
+app.logger.setLevel(logging.INFO)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 
@@ -169,6 +171,9 @@ class ModelOutputError(Exception):
 
 def _json_from_response(resp) -> dict:
     if resp.stop_reason == 'max_tokens':
+        tail = next((b.text for b in resp.content if b.type == 'text'), '')[-400:]
+        app.logger.warning('Output truncated at max_tokens. Block types: %s. Last 400 chars: %r',
+                           [b.type for b in resp.content], tail)
         raise ModelOutputError(
             'The model ran out of output tokens. Raise ANTHROPIC_MAX_TOKENS or use a shorter document.')
     if resp.stop_reason == 'refusal':
